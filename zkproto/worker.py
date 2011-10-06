@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import datetime
 import os
 import sys
 import threading
@@ -8,15 +7,24 @@ import logging
 
 import zookeeper
 
+from zkproto import cyvents
+
 log = logging.getLogger('zkproto')
+eventlog = logging.getLogger('cyvents')
+
+_procname = os.environ.get('SUPERVISOR_PROCESS_NAME')
+if not _procname:
+    _procname = "zkproto"
 
 def configure_logging():
-    procname = os.environ.get('SUPERVISOR_PROCESS_NAME')
-    if not procname:
-        procname = "zkproto"
-    format = procname + " %(asctime)s %(levelname)s - %(message)s"
+    format = _procname + " %(asctime)s %(levelname)s - %(message)s"
     logging.basicConfig(level=logging.DEBUG, format=format)
 
+    eventhandler = logging.StreamHandler(sys.stdout)
+    eventlog.addHandler(eventhandler)
+
+def cyvent(name, extra=None):
+    cyvents.event(_procname, name, eventlog, extra)
 
 ZK_OPEN_ACL_UNSAFE = {"perms":0x1f, "scheme":"world", "id" :"anyone"}
 ZK_BAD_ACLS = [ZK_OPEN_ACL_UNSAFE]
@@ -43,14 +51,15 @@ class Contender(object):
         log.debug("ZK global watch: handle=%s type=%s state=%s path=%s",
                 handle, type, state, path)
 
+        #TODO this is wrong.. same watcher will tell us about disconnection
         self.cv.acquire()
         self.connected = True
+        cyvent("CONNECTED")
         self.cv.notify()
         self.cv.release()
 
     def _assume_leadership(self):
-        print "%s I AM THE LEADER!" % datetime.datetime.now()
-        sys.stdout.flush()
+        pass
     
     def vie(self):
         # first everyone tries to create the election node (one at most wins)
@@ -84,6 +93,7 @@ class Contender(object):
             index = candidates.index(childname)
 
             if index == 0:
+                cyvent("LEADER")
                 self._assume_leadership()
                 return
 
@@ -97,6 +107,8 @@ class Contender(object):
                 log.info('failed to set watch because node is gone! %s',
                         predecessor)
                 continue
+            
+            cyvent("IN_LINE", extra=dict(order=index))
 
             log.info("Waiting for death watch of %s", predecessor)
             c.wait()
