@@ -2,11 +2,13 @@
 
 import os
 import sys
-import threading
 import logging
 
+import gevent
+import gevent.event
 import zookeeper
 
+from zkproto.zookeeper_gevent import ZookeeperClient
 from zkproto import cyvents
 
 log = logging.getLogger('zkproto')
@@ -29,98 +31,64 @@ def cyvent(name, extra=None):
 ZK_OPEN_ACL_UNSAFE = {"perms":0x1f, "scheme":"world", "id" :"anyone"}
 ZK_BAD_ACLS = [ZK_OPEN_ACL_UNSAFE]
 
-class Contender(object):
-    def __init__(self, host, node):
-        self.host = host
-        self.node = node
-        
-        self.handle = None
-        self.connected = False
-        self.leader = False
-        self.cv = threading.Condition()
-        
-    def connect(self):
-        self.cv.acquire()
-        self.handle = zookeeper.init(self.host, self._watcher, 10000)
-        self.cv.wait(10)
-        if not self.connected:
-            raise Exception("Connection to ZK timed out!")
-        self.cv.release()
+def contender(hosts, node):
+    zk = ZookeeperClient(hosts, 10000)
 
-    def _watcher(self, handle, type, state, path):
-        log.debug("ZK global watch: handle=%s type=%s state=%s path=%s",
-                handle, type, state, path)
+    zk.connect()
 
-        #TODO this is wrong.. same watcher will tell us about disconnection
-        self.cv.acquire()
-        self.connected = True
-        cyvent("CONNECTED")
-        self.cv.notify()
-        self.cv.release()
+    # first everyone tries to create the election node (one at most wins)
+    try:
+        zk.create(node, "", ZK_BAD_ACLS, 0)
+        log.info("Created node: %s", node)
+    except zookeeper.NodeExistsException:
+        log.info("Node already existed: %s", node)
 
-    def _assume_leadership(self):
-        pass
-    
-    def vie(self):
-        # first everyone tries to create the election node (one at most wins)
+    # now everyone creates an ephemeral sequence node under the election
+
+    realpath = zk.create(node+"/c_", '', ZK_BAD_ACLS,
+                         zookeeper.SEQUENCE | zookeeper.EPHEMERAL)
+    childname = os.path.basename(realpath)
+
+    log.debug("Created %s", childname)
+
+    death = gevent.event.Event()
+    def death_watch(type, state, path):
+        log.debug("ZK predecessor watch: type=%s state=%s path=%s", type,
+                  state, path)
+        death.set()
+
+    # list children and pick out the one just below our own
+    while True:
+        candidates = sorted(zk.get_children(node))
+        assert candidates, "election node has no children??"
+
+        index = candidates.index(childname)
+
+        if index == 0:
+            cyvent("LEADER")
+
+            while True:
+                # what else to do here?
+                gevent.sleep(10)
+
+        # set a watch on the child just before us
+        predecessor = node + "/" + candidates[index-1]
         try:
-            zookeeper.create(self.handle, self.node, '', ZK_BAD_ACLS, 0)
-            log.info("Created node: %s", self.node)
-        except zookeeper.NodeExistsException:
-            log.info("Node already existed: %s", self.node)
+            zk.get(predecessor, death_watch)
+        except zookeeper.NoNodeException:
+            log.info('failed to set watch because node is gone! %s',
+                    predecessor)
+            continue
 
-        # now everyone creates an ephemeral sequence node under the election
+        cyvent("IN_LINE", extra=dict(order=index))
 
-        realpath = zookeeper.create(self.handle, self.node+"/c_", '',
-                ZK_BAD_ACLS, zookeeper.SEQUENCE|zookeeper.EPHEMERAL)
-        childname = os.path.basename(realpath)
-
-        c = threading.Condition()
-        def _watch_predecessor(handle, type, state, path):
-            log.debug("ZK predecessor watch: handle=%s type=%s state=%s path=%s",
-                    handle, type, state, path)
-            c.acquire()
-            c.notify()
-            c.release()
-        
-        # list children and pick out the one just below our own
-        while True:
-            candidates = sorted(zookeeper.get_children(self.handle, self.node,
-                None))
-            assert candidates, "election node has no children??"
-
-
-            index = candidates.index(childname)
-
-            if index == 0:
-                cyvent("LEADER")
-                self._assume_leadership()
-                return
-
-            # set a watch on the child just before us
-            predecessor = self.node + "/" + candidates[index-1]
-            c.acquire()
-            try:
-                zookeeper.get(self.handle, predecessor, _watch_predecessor)
-            except zookeeper.NoNodeException:
-                c.release()
-                log.info('failed to set watch because node is gone! %s',
-                        predecessor)
-                continue
-            
-            cyvent("IN_LINE", extra=dict(order=index))
-
-            log.info("Waiting for death watch of %s", predecessor)
-            c.wait()
+        log.info("Waiting for death watch of %s", predecessor)
+        death.wait()
 
 def main():
     configure_logging()
-    c = Contender('localhost:2181', '/election2')
-    c.connect()
-    c.vie()
-    while True:
-        c.cv.acquire()
-        c.cv.wait()
+    c = gevent.spawn(contender, 'localhost:2181', '/election2')
+    c.join()
 
 
 if __name__ == '__main__':
