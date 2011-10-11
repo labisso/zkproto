@@ -9,20 +9,18 @@ class Supervisor(object):
         self.username = username
         self.password = password
 
-        self.proxy = None
-
         self.offsets = defaultdict(int)
 
-    def connect(self):
+    def _proxy(self):
         transport = supervisor.xmlrpc.SupervisorTransport(self.username,
                 self.password, self.url)
         # using special supervisor.xmlrpc transport so URL here
         # doesn't matter
-        self.proxy = xmlrpclib.ServerProxy('http://127.0.0.1',
+        return xmlrpclib.ServerProxy('http://127.0.0.1',
                 transport=transport)
 
     def get_group_process_names(self, group):
-        procs = self.proxy.supervisor.getAllProcessInfo()
+        procs = self._proxy().supervisor.getAllProcessInfo()
         procnames = []
         for proc in procs:
             if proc['group'] == group:
@@ -30,16 +28,13 @@ class Supervisor(object):
         return procnames
 
     def get_process_loglines(self, name):
-        buf = self.proxy.supervisor.readProcessStdoutLog(name, self.offsets[name], 4096)
+        buf = self._proxy().supervisor.readProcessStdoutLog(name, self.offsets[name], 4096)
 
         last_newline = buf.rfind('\n')
         if last_newline == -1:
             return []
 
         read_length = last_newline + 1
-
-        if read_length != len(buf):
-            print "skipping %d bytes of unfinished line!" % (len(buf) - read_length)
 
         self.offsets[name] += read_length
         return buf[:read_length].split('\n')
@@ -49,15 +44,15 @@ class Supervisor(object):
             pass
     
     def restart_process(self, name):
-        self.proxy.supervisor.stopProcess(name)
-        self.proxy.supervisor.startProcess(name)
+        self._proxy().supervisor.stopProcess(name)
+        self._proxy().supervisor.startProcess(name)
     
     def start_group(self, group):
-        return self.proxy.supervisor.startProcessGroup(group)
+        return self._proxy().supervisor.startProcessGroup(group)
 
     def stop_group(self, group):
-        return self.proxy.supervisor.stopProcessGroup(group)
+        return self._proxy().supervisor.stopProcessGroup(group)
 
     def clear_logs(self, process):
-        return self.proxy.supervisor.clearProcessLogs(process)
+        return self._proxy().supervisor.clearProcessLogs(process)
 

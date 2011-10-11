@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+import json
+import random
 
 import os
 import sys
@@ -15,8 +17,11 @@ log = logging.getLogger('zkproto')
 eventlog = logging.getLogger('cyvents')
 
 _procname = os.environ.get('SUPERVISOR_PROCESS_NAME')
+_procgroupname = os.environ.get('SUPERVISOR_GROUP_NAME')
 if not _procname:
     _procname = "zkproto"
+if _procgroupname:
+    _procname = _procgroupname + ":" + _procname
 
 def configure_logging():
     format = _procname + " %(asctime)s %(levelname)s - %(message)s"
@@ -31,17 +36,19 @@ def cyvent(name, extra=None):
 ZK_OPEN_ACL_UNSAFE = {"perms":0x1f, "scheme":"world", "id" :"anyone"}
 ZK_BAD_ACLS = [ZK_OPEN_ACL_UNSAFE]
 
-def contender(hosts, node):
-    zk = ZookeeperClient(hosts, 10000)
+def lead():
+    while True:
+        # what else to do here?
+        gevent.sleep(10)
 
-    zk.connect()
+def contender(zk, node):
 
     # first everyone tries to create the election node (one at most wins)
     try:
         zk.create(node, "", ZK_BAD_ACLS, 0)
-        log.info("Created node: %s", node)
+        log.info("Created election node: %s", node)
     except zookeeper.NodeExistsException:
-        log.info("Node already existed: %s", node)
+        log.info("Election node already existed: %s", node)
 
     # now everyone creates an ephemeral sequence node under the election
 
@@ -67,9 +74,8 @@ def contender(hosts, node):
         if index == 0:
             cyvent("LEADER")
 
-            while True:
-                # what else to do here?
-                gevent.sleep(10)
+            # once elected, lead for life.
+            return lead()
 
         # set a watch on the child just before us
         predecessor = node + "/" + candidates[index-1]
@@ -85,10 +91,66 @@ def contender(hosts, node):
         log.info("Waiting for death watch of %s", predecessor)
         death.wait()
 
+def cooperative_writer(zk, node):
+    """This demonstrates node updates where the old version number is specified.
+
+    If the node has since changed, the update will fail. In this example each
+    worker reads the node, adds their name, and writes it back. Afterwards the
+    node data can be compared to what each worker claimed to write.
+
+    """
+    # wait for the node to exist
+    while True:
+        try:
+            zk.get(node)
+        except zookeeper.NoNodeException:
+            gevent.sleep(0.1)
+        else:
+            break
+
+    max_length = 1024 * 32
+
+    # sleep a random amount of time at start
+    gevent.sleep(random.uniform(0.1, 1.0))
+    while True:
+
+        # grab the existing node data
+        data, stat = zk.get(node)
+
+        # add our name to the list
+        newdata = data + _procname + "\n"
+
+        # exit if the new data would put the node over its limit
+        if len(newdata) > max_length:
+            cyvent("DONE")
+            return
+
+        # write the new data back to ZK node, careful to specify version
+
+        try:
+            zk.set(node, newdata, stat['version'])
+        except zookeeper.BadVersionException:
+            log.debug("Failed to update data due to version conflict")
+            cyvent("WRITE_CONFLICT")
+        else:
+            log.debug("Wrote our name! len=%d", len(newdata))
+            cyvent("WRITE_OK")
+            # sleep a random amount of time before next round
+
+            gevent.sleep(random.uniform(0.0, 0.1))
+
+
 def main():
     configure_logging()
-    c = gevent.spawn(contender, 'localhost:2181', '/election2')
-    c.join()
+
+    zk = ZookeeperClient('localhost:2181', 5000)
+    zk.connect()
+
+    election_greenlet = gevent.spawn(contender, zk, '/election')
+
+    writer_greenlet = gevent.spawn(cooperative_writer, zk, "/thewriteplace")
+
+    writer_greenlet.join()
 
 
 if __name__ == '__main__':

@@ -139,6 +139,23 @@ class ZookeeperClient(object):
         async_result = self.get_children_async(path, watcher)
         return async_result.get()
 
+    def set_async(self, path, data, version=-1):
+        async_result = self._new_async_result()
+
+        def callback(handle, code, stat):
+            if code != zookeeper.OK:
+                exc = err_to_exception(code)
+                async_result.set_exception(exc)
+            else:
+                async_result.set(stat)
+
+        zookeeper.aset(self._handle, path, data, version, callback)
+        return async_result
+
+    def set(self, path, data, version=-1):
+        async_result = self.set_async(path, data, version)
+        return async_result.get()
+
     def _setup_watcher(self, fun):
         if fun is None:
             return None, None
