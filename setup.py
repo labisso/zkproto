@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-import sys
-
 setupdict = {
     'name' : 'zkproto',
     'version' : '0.1',
@@ -22,18 +20,12 @@ setupdict = {
 
 from setuptools import setup, find_packages
 setupdict['packages'] = find_packages()
-
-setupdict['dependency_links'] = ['http://ooici.net/releases']
-
-# ssl package won't install on 2.6+, but is required otherwise.
-# also, somehow the order matters and ssl needs to be before ioncore
-# in this list (at least with setuptools 0.6c11).
-
-setupdict['install_requires'] = ['supervisor', 'zkpython']
+setupdict['install_requires'] = ['supervisor', 'zkpython', 'gevent']
 
 setupdict['entry_points'] = {
         'console_scripts': [
-            'zkproto-worker=zkproto.worker:main'
+            'zkproto-worker=zkproto.worker:main',
+            'zkproto-trials=zkproto.trials:main'
             ]
         }
 
