@@ -37,10 +37,23 @@ class ZooAsyncResult(gevent.event.AsyncResult):
         gevent.event.AsyncResult.set(self, value)
         os.write(self._pipe, '\0')
 
-class ZookeeperClient(object):
-    """A client to Apache Zookeeper that is friendly to gevent
 
-    TODO lots to do.
+class ZookeeperClient(object):
+    """A gevent-friendly wrapper of the Apache Zookeeper zkpython client
+
+    zkpython supports asynchronous operations where a callback function is
+    specified, but the callback happens on a different OS thread. This wrapper
+    client uses an os.pipe() and a modified subclass of AsyncResult to trigger
+    events back to the gevent thread.
+
+    TODO lots to do:
+    * handling of ZK client session events
+        * long running greenlet triggered by os.pipe() trick that pulls events
+          off of a threadsafe queue?
+    * cleanup of watcher greenlets?
+    * disconnected state handling
+    * tests
+    * the rest of the operations
     """
     def __init__(self, hosts, timeout):
         self._hosts = hosts
@@ -49,9 +62,8 @@ class ZookeeperClient(object):
         self._pipe_read, self._pipe_write = _pipe()
 
         self._event = gevent.core.event(
-            gevent.core.EV_READ|gevent.core.EV_PERSIST,
-            self._pipe_read, _pipe_read_callback
-        )
+            gevent.core.EV_READ | gevent.core.EV_PERSIST,
+            self._pipe_read, _pipe_read_callback)
         self._event.add()
 
         self._connected = False
@@ -64,6 +76,10 @@ class ZookeeperClient(object):
                 self._event.cancel()
             except Exception:
                 pass
+
+    @property
+    def connected(self):
+        return self._connected
 
     def _new_async_result(self):
         return ZooAsyncResult(self._pipe_write)
@@ -80,13 +96,37 @@ class ZookeeperClient(object):
                                       self._timeout)
         self._connected_async_result.wait()
 
+    def close(self):
+        if self._connected:
+            code = zookeeper.close(self._handle)
+            self._handle = None
+            self._connected = False
+            if code != zookeeper.OK:
+                raise err_to_exception(code)
+
+    def add_auth_async(self, scheme, credential):
+        async_result = self._new_async_result()
+
+        def callback(handle, code):
+            if code != zookeeper.OK:
+                exc = err_to_exception(code)
+                async_result.set_exception(exc)
+            else:
+                async_result.set(None)
+
+        zookeeper.add_auth(self._handle, scheme, credential, callback)
+        return async_result
+
+    def add_auth(self, scheme, credential):
+        return self.add_auth_async(scheme, credential).get()
+
     def create_async(self, path, value, acl, flags):
         async_result = self._new_async_result()
 
         def callback(handle, code, path):
             if code != zookeeper.OK:
                 exc = err_to_exception(code)
-                async_result.set_exception(exc())
+                async_result.set_exception(exc)
             else:
                 async_result.set(path)
 
@@ -94,8 +134,7 @@ class ZookeeperClient(object):
         return async_result
 
     def create(self, path, value, acl, flags):
-        async_result = self.create_async(path, value, acl, flags)
-        return async_result.get()
+        return self.create_async(path, value, acl, flags).get()
 
     def get_async(self, path, watcher=None):
         async_result = self._new_async_result()
@@ -115,8 +154,7 @@ class ZookeeperClient(object):
         return async_result
 
     def get(self, path, watcher=None):
-        async_result = self.get_async(path, watcher)
-        return async_result.get()
+        return self.get_async(path, watcher).get()
 
     def get_children_async(self, path, watcher=None):
         async_result = self._new_async_result()
@@ -136,8 +174,7 @@ class ZookeeperClient(object):
         return async_result
 
     def get_children(self, path, watcher=None):
-        async_result = self.get_children_async(path, watcher)
-        return async_result.get()
+        return self.get_children_async(path, watcher).get()
 
     def set_async(self, path, data, version=-1):
         async_result = self._new_async_result()
@@ -153,8 +190,7 @@ class ZookeeperClient(object):
         return async_result
 
     def set(self, path, data, version=-1):
-        async_result = self.set_async(path, data, version)
-        return async_result.get()
+        return self.set_async(path, data, version).get()
 
     def _setup_watcher(self, fun):
         if fun is None:
@@ -199,7 +235,20 @@ _ERR_TO_EXCEPTION = {
     zookeeper.SESSIONMOVED: zookeeper.SESSIONMOVED,
 }
 
-def err_to_exception(error_code):
+def err_to_exception(error_code, msg=None):
+    """Return an exception object for a Zookeeper error code
+    """
+    try:
+        zkmsg = zookeeper.zerror(error_code)
+    except Exception:
+        zkmsg = ""
+
+    if msg:
+        if zkmsg:
+            msg = "%s: %s" % (zkmsg, msg)
+    else:
+        msg = zkmsg
+
     exc = _ERR_TO_EXCEPTION.get(error_code)
     if exc is None:
 
@@ -208,5 +257,5 @@ def err_to_exception(error_code):
             return None
 
         # otherwise generic exception
-        return Exception
-    return exc
+        exc = Exception
+    return exc(msg)
