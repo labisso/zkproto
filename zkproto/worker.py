@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-import json
 import random
 
 import os
@@ -137,7 +136,7 @@ def cooperative_writer(zk, node):
             cyvent("WRITE_OK")
             # sleep a random amount of time before next round
 
-            gevent.sleep(random.uniform(0.0, 0.1))
+            gevent.sleep(random.uniform(0.0, 0.01))
 
 
 def main():

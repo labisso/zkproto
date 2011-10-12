@@ -15,6 +15,8 @@ class ZKProtoFixture(object):
         self.groupname = groupname
 
         self.supd_processes = {}
+
+        self.connected = False
         
         self.all_processes = []
         for name, supd_config in supd_configs.iteritems():
@@ -39,6 +41,7 @@ class ZKProtoFixture(object):
         jobs = [gevent.spawn(do_connect, supname, supd)
                 for supname, supd in self.supervisors.iteritems()]
         gevent.joinall(jobs)
+        self.connected = True
 
     def reset_all_workers(self):
         def do_reset(supname, supd):
